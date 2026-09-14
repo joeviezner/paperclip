@@ -991,6 +991,76 @@ describe("evaluateCodexCredentialReadiness", () => {
     }
   });
 
+  it("removes inherited MCP servers from a managed Codex home", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-mcp-config-"));
+    try {
+      const configPath = path.join(root, "config.toml");
+      await fs.writeFile(
+        configPath,
+        [
+          'model = "gpt-5"',
+          "",
+          "[mcp_servers.prenco365-graph]",
+          'command = "node"',
+          'args = ["graph.js"]',
+          "",
+          "[mcp_servers.prenco365-graph.env]",
+          'PROTOCOL_VERSION = "1"',
+          "",
+          "[desktop]",
+          'conversationDetailMode = "STEPS_PROSE"',
+          "",
+        ].join("\n"),
+      );
+
+      const result = await writeManagedCodexMcpConfig({
+        codexHome: root,
+        apiBaseUrl: "https://paperclip.example",
+        removeUnmanagedServers: true,
+        gateways: [{
+          name: "paperclip-assigned",
+          endpointPath: "/mcp/gateways/assigned",
+          bearerToken: "assigned-token",
+        }],
+      });
+
+      const config = await fs.readFile(configPath, "utf8");
+      expect(config).toContain('model = "gpt-5"');
+      expect(config).toContain("[desktop]");
+      expect(config).toContain('[mcp_servers."paperclip-assigned"]');
+      expect(config).not.toContain("mcp_servers.prenco365-graph");
+      expect(config).not.toContain("graph.js");
+      expect(result.warnings).toEqual([
+        'Removed unmanaged Codex MCP server "prenco365-graph" from the Paperclip-managed home. Install it as a Paperclip connection to grant governed agent access.',
+      ]);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves MCP servers in an explicitly self-managed Codex home", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-mcp-config-"));
+    try {
+      const configPath = path.join(root, "config.toml");
+      await fs.writeFile(
+        configPath,
+        '[mcp_servers.operator-tool]\ncommand = "operator-mcp"\n',
+      );
+
+      const result = await writeManagedCodexMcpConfig({
+        codexHome: root,
+        apiBaseUrl: "https://paperclip.example",
+        gateways: [],
+        removeUnmanagedServers: false,
+      });
+
+      expect(await fs.readFile(configPath, "utf8")).toContain("mcp_servers.operator-tool");
+      expect(result.warnings).toEqual([]);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("replaces the managed MCP block and clears stale servers for an empty runtime set", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-mcp-config-"));
     try {

@@ -276,6 +276,27 @@ function stripManagedMcpBlock(config: string): string {
   return `${config.slice(0, start)}${config.slice(end + MANAGED_MCP_BLOCK_END.length)}`.trimEnd();
 }
 
+function stripUnmanagedMcpServers(config: string): {
+  config: string;
+  removedNames: string[];
+} {
+  const discoveredNames = [...readCodexMcpServerNames(config)].sort();
+  const removedNames = discoveredNames.filter(
+    (name) => !discoveredNames.some((parent) => parent !== name && name.startsWith(`${parent}.`)),
+  );
+
+  let insideMcpServerTable = false;
+  const keptLines: string[] = [];
+  for (const line of config.split(/\r?\n/)) {
+    const table = line.match(/^\s*\[\s*([^\]]+?)\s*\]\s*(?:#.*)?$/)?.[1]?.trim();
+    if (table) {
+      insideMcpServerTable = /^(?:mcp_servers|"mcp_servers"|'mcp_servers')(?:\s*\.|$)/.test(table);
+    }
+    if (!insideMcpServerTable) keptLines.push(line);
+  }
+  return { config: keptLines.join("\n").trimEnd(), removedNames };
+}
+
 function readCodexMcpServerNames(config: string): Set<string> {
   const names = new Set<string>();
   for (const match of config.matchAll(/^\s*\[\s*mcp_servers\s*\.\s*(?:"([^"]+)"|'([^']+)'|([^\]\s#]+))\s*\]/gm)) {
@@ -327,6 +348,7 @@ export async function writeManagedCodexMcpConfig(input: {
   codexHome: string;
   apiBaseUrl: string;
   gateways: ManagedCodexMcpGateway[];
+  removeUnmanagedServers?: boolean;
 }): Promise<{ configPath: string; warnings: string[] }> {
   const configPath = path.join(input.codexHome, "config.toml");
   await fs.mkdir(input.codexHome, { recursive: true });
@@ -335,14 +357,24 @@ export async function writeManagedCodexMcpConfig(input: {
     throw error;
   });
   const unmanagedConfig = stripManagedMcpBlock(existing);
-  const { block, warnings } = buildManagedMcpBlock({
+  const sanitized = input.removeUnmanagedServers
+    ? stripUnmanagedMcpServers(unmanagedConfig)
+    : { config: unmanagedConfig, removedNames: [] };
+  const { block, warnings: gatewayWarnings } = buildManagedMcpBlock({
     gateways: input.gateways,
     apiBaseUrl: input.apiBaseUrl,
-    existingNames: readCodexMcpServerNames(unmanagedConfig),
+    existingNames: readCodexMcpServerNames(sanitized.config),
   });
+  const warnings = [
+    ...sanitized.removedNames.map(
+      (name) =>
+        `Removed unmanaged Codex MCP server "${name}" from the Paperclip-managed home. Install it as a Paperclip connection to grant governed agent access.`,
+    ),
+    ...gatewayWarnings,
+  ];
   const next = input.gateways.length > 0
-    ? `${unmanagedConfig}${unmanagedConfig ? "\n\n" : ""}${block}\n`
-    : `${unmanagedConfig}${unmanagedConfig ? "\n" : ""}`;
+    ? `${sanitized.config}${sanitized.config ? "\n\n" : ""}${block}\n`
+    : `${sanitized.config}${sanitized.config ? "\n" : ""}`;
   await fs.writeFile(configPath, next, { mode: 0o600 });
   await fs.chmod(configPath, 0o600);
   return { configPath, warnings };
