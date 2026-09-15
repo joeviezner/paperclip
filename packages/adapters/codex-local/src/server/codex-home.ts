@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
 import { resolvePaperclipInstanceRootForAdapter } from "@paperclipai/adapter-utils/server-utils";
+import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import { isCodexAuthCachePath, readSubscriptionAccountId } from "./codex-auth-cache.js";
 
 const TRUTHY_ENV_RE = /^(1|true|yes|on)$/i;
@@ -279,31 +280,31 @@ function stripManagedMcpBlock(config: string): string {
 function stripUnmanagedMcpServers(config: string): {
   config: string;
   removedNames: string[];
+  removedUnnamedDefinition: boolean;
 } {
-  const discoveredNames = [...readCodexMcpServerNames(config)].sort();
-  const removedNames = discoveredNames.filter(
-    (name) => !discoveredNames.some((parent) => parent !== name && name.startsWith(`${parent}.`)),
-  );
-
-  let insideMcpServerTable = false;
-  const keptLines: string[] = [];
-  for (const line of config.split(/\r?\n/)) {
-    const table = line.match(/^\s*\[\s*([^\]]+?)\s*\]\s*(?:#.*)?$/)?.[1]?.trim();
-    if (table) {
-      insideMcpServerTable = /^(?:mcp_servers|"mcp_servers"|'mcp_servers')(?:\s*\.|$)/.test(table);
-    }
-    if (!insideMcpServerTable) keptLines.push(line);
+  const parsed = parseToml(config);
+  const rawServers = parsed.mcp_servers;
+  if (rawServers === undefined) {
+    return { config: config.trimEnd(), removedNames: [], removedUnnamedDefinition: false };
   }
-  return { config: keptLines.join("\n").trimEnd(), removedNames };
+  const removedNames =
+    rawServers !== null && typeof rawServers === "object" && !Array.isArray(rawServers)
+      ? Object.keys(rawServers).sort()
+      : [];
+  delete parsed.mcp_servers;
+  return {
+    config: stringifyToml(parsed).trimEnd(),
+    removedNames,
+    removedUnnamedDefinition: removedNames.length === 0,
+  };
 }
 
 function readCodexMcpServerNames(config: string): Set<string> {
-  const names = new Set<string>();
-  for (const match of config.matchAll(/^\s*\[\s*mcp_servers\s*\.\s*(?:"([^"]+)"|'([^']+)'|([^\]\s#]+))\s*\]/gm)) {
-    const name = match[1] ?? match[2] ?? match[3];
-    if (name) names.add(name.trim());
+  const rawServers = parseToml(config).mcp_servers;
+  if (rawServers === null || typeof rawServers !== "object" || Array.isArray(rawServers)) {
+    return new Set();
   }
-  return names;
+  return new Set(Object.keys(rawServers));
 }
 
 function buildManagedMcpBlock(input: {
@@ -359,7 +360,7 @@ export async function writeManagedCodexMcpConfig(input: {
   const unmanagedConfig = stripManagedMcpBlock(existing);
   const sanitized = input.removeUnmanagedServers
     ? stripUnmanagedMcpServers(unmanagedConfig)
-    : { config: unmanagedConfig, removedNames: [] };
+    : { config: unmanagedConfig, removedNames: [], removedUnnamedDefinition: false };
   const { block, warnings: gatewayWarnings } = buildManagedMcpBlock({
     gateways: input.gateways,
     apiBaseUrl: input.apiBaseUrl,
@@ -370,6 +371,11 @@ export async function writeManagedCodexMcpConfig(input: {
       (name) =>
         `Removed unmanaged Codex MCP server "${name}" from the Paperclip-managed home. Install it as a Paperclip connection to grant governed agent access.`,
     ),
+    ...(sanitized.removedUnnamedDefinition
+      ? [
+          "Removed unmanaged Codex MCP server configuration from the Paperclip-managed home. Install external tools as Paperclip connections to grant governed agent access.",
+        ]
+      : []),
     ...gatewayWarnings,
   ];
   const next = input.gateways.length > 0

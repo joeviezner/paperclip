@@ -1038,6 +1038,66 @@ describe("evaluateCodexCredentialReadiness", () => {
     }
   });
 
+  it("removes dotted-key and inline MCP definitions from a managed Codex home", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-mcp-config-"));
+    try {
+      const cases = [
+        {
+          name: "dotted",
+          definition: [
+            'mcp_servers.direct.command = "node"',
+            '"mcp_servers"."quoted".args = [',
+            '  "quoted.js",',
+            "]",
+          ].join("\n"),
+          removedValue: "quoted.js",
+          warning: 'Removed unmanaged Codex MCP server "direct"',
+        },
+        {
+          name: "inline",
+          definition: 'mcp_servers = { inline = { command = "inline-mcp" } }',
+          removedValue: "inline-mcp",
+          warning: 'Removed unmanaged Codex MCP server "inline"',
+        },
+      ];
+
+      for (const testCase of cases) {
+        const codexHome = path.join(root, testCase.name);
+        const configPath = path.join(codexHome, "config.toml");
+        await fs.mkdir(codexHome);
+        await fs.writeFile(
+          configPath,
+          [
+            'model = "gpt-5"',
+            testCase.definition,
+            "",
+            "[desktop]",
+            'mcp_servers.theme = "dark"',
+            "",
+          ].join("\n"),
+        );
+
+        const result = await writeManagedCodexMcpConfig({
+          codexHome,
+          apiBaseUrl: "https://paperclip.example",
+          removeUnmanagedServers: true,
+          gateways: [],
+        });
+
+        const config = await fs.readFile(configPath, "utf8");
+        expect(config).toContain('model = "gpt-5"');
+        expect(config).toContain("[desktop.mcp_servers]");
+        expect(config).toContain('theme = "dark"');
+        expect(config).not.toContain(testCase.removedValue);
+        expect(result.warnings).toEqual(
+          expect.arrayContaining([expect.stringContaining(testCase.warning)]),
+        );
+      }
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("preserves MCP servers in an explicitly self-managed Codex home", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-mcp-config-"));
     try {
